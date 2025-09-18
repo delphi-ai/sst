@@ -1,0 +1,10 @@
+{
+  "name": "sst-darwin-x64",
+  "version": "0.0.0",
+  "description": "Platform-specific SST binary for darwin-x64",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "bin": {
+    "sst": "./bin/sst"
+  }
+}

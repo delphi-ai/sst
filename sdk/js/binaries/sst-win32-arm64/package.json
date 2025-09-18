@@ -1,0 +1,10 @@
+{
+  "name": "sst-win32-arm64",
+  "version": "0.0.0",
+  "description": "Platform-specific SST binary for win32-arm64",
+  "os": ["win32"],
+  "cpu": ["arm64"],
+  "bin": {
+    "sst": "./bin/sst.exe"
+  }
+}
