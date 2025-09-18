@@ -42,7 +42,16 @@
   "bin": {
     "sst": "./bin/sst.mjs"
   },
-  "optionalDependencies": {},
+  "optionalDependencies": {
+    "sst-darwin-x64": "file:./binaries/sst-darwin-x64",
+    "sst-darwin-arm64": "file:./binaries/sst-darwin-arm64",
+    "sst-linux-x64": "file:./binaries/sst-linux-x64",
+    "sst-linux-arm64": "file:./binaries/sst-linux-arm64",
+    "sst-linux-x86": "file:./binaries/sst-linux-x86",
+    "sst-win32-x64": "file:./binaries/sst-win32-x64",
+    "sst-win32-arm64": "file:./binaries/sst-win32-arm64",
+    "sst-win32-x86": "file:./binaries/sst-win32-x86"
+  },
   "dependencies": {
     "aws-sdk": "2.1692.0",
     "aws4fetch": "1.0.18",

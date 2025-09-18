@@ -1,0 +1,10 @@
+{
+  "name": "sst-linux-x64",
+  "version": "0.0.0",
+  "description": "Platform-specific SST binary for linux-x64",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "bin": {
+    "sst": "./bin/sst"
+  }
+}

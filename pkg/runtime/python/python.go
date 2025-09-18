@@ -68,45 +68,17 @@ func (w *Worker) Logs() io.ReadCloser {
 	return reader
 }
 
-type PythonRuntime struct {
-	lastBuiltHandler map[string]string
-}
+type PythonRuntime struct{}
 
 func New() *PythonRuntime {
-	return &PythonRuntime{
-		lastBuiltHandler: map[string]string{},
-	}
+	return &PythonRuntime{}
 }
 
 func (r *PythonRuntime) Build(ctx context.Context, input *runtime.BuildInput) (*runtime.BuildOutput, error) {
-	/// Workspaces are the most challenging part of the build process
-	/// UV currently does not support --include-workspace-deps for builds
-	/// See: https://github.com/astral-sh/uv/issues/6935 hopefully this lands soon
-
-	/// As a result, we have to manually construct the dependency tree
-	/// So we need to:
-	///
-	/// 1. Build all packages (future tree shaking would be nice)
-	/// 2. Ensure local packages are built for lambdaric acccess (remove src/ nesting)
-	///			To future readers: we need to do this because of the way python packages are resolved
-	///			if you have a package called "mypackage" and it contains a sub-package called "src/mypackage"
-	///			then within the package you can resolve code via "import mypackage" but not "import mypackage.src.mypackage"
-	///			this means that builds get a little strange for aws lambda which does module level imports via lambdaric
-	///			so we need to ensure that the package is built such that lambdaric can resolve paths in the output bundle
-	///			but the full package is available for local development
-	/// 3. Export the uv package index to requirements.txt
-	/// 4. Install the dependencies into the artifact directory as a target (local for zip and delegate to the dockerfile for containers)
-
-	file, err := r.getFile(input)
-	if err != nil {
-		return nil, fmt.Errorf("handler not found: %v", err)
-	}
-
 	build, err := r.CreateBuildAsset(ctx, input)
 	if err != nil {
 		return nil, err
 	}
-	r.lastBuiltHandler[input.FunctionID] = file
 
 	return build, nil
 
@@ -187,6 +159,15 @@ func (r *PythonRuntime) CreateBuildAsset(ctx context.Context, input *runtime.Bui
 	// Get the architecture from the input.properties.architecture json field
 	slog.Info("input properties", "json", string(input.Properties))
 
+	packageName := input.Handler
+	parts := strings.Split(packageName, ".")
+	if len(parts) > 1 {
+		packageName = parts[0]
+	}
+	packageName = strings.ReplaceAll(packageName, "_", "-")
+
+	slog.Info("building function", "packageName", packageName)
+
 	type Properties struct {
 		Architecture string `json:"architecture"`
 		Container    bool   `json:"container"`
@@ -205,6 +186,7 @@ func (r *PythonRuntime) CreateBuildAsset(ctx context.Context, input *runtime.Bui
 		return nil, fmt.Errorf("invalid architecture %q - must be x86_64 or arm64 - %v", arch, string(input.Properties))
 	}
 	workingDir := path.ResolveRootDir(input.CfgPath)
+	slog.Info("workingDir", "dir", workingDir)
 
 	// 1. Generate non-local package index
 	syncCmd := process.CommandContext(ctx, "uv", "sync", "--all-packages")
@@ -220,99 +202,38 @@ func (r *PythonRuntime) CreateBuildAsset(ctx context.Context, input *runtime.Bui
 	slog.Error("uv sync output", "output", string(syncOutput))
 
 	outputRequirementsFile := filepath.Join(input.Out(), "requirements.txt")
-	packageName, err := r.getPackageName(input)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get package name: %v", err)
-	}
-	exportCmd := process.CommandContext(ctx, "uv", "export", "--package="+packageName, "--output-file="+outputRequirementsFile, "--no-emit-workspace", "--no-dev")
+
+	exportCmd := process.CommandContext(ctx, "uv", "export", "--package="+packageName, "--output-file="+outputRequirementsFile, "--frozen", "--no-default-groups", "--no-editable")
 	exportCmd.Dir = workingDir
 	err = exportCmd.Run()
 	if err != nil {
 		return nil, fmt.Errorf("failed to run uv export: %v", err)
 	}
 
-	// 2. Build the entire workspace - this should cache and be fast thank you astral
-	buildCmd := process.CommandContext(ctx, "uv", "build", "--all", "--sdist", "--out-dir="+input.Out())
-	buildCmd.Dir = workingDir
-	buildOutput, err := buildCmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("failed to run uv build: %v\n%s", err, string(buildOutput))
-	}
-	slog.Error("uv build output", "output", string(buildOutput))
-
-	// 3. Decode each tar.gz file in the dist directory and remove the trailing "-{version}"
-	files, err := filepath.Glob(filepath.Join(input.Out(), "*.tar.gz"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to glob tar.gz files: %v", err)
-	}
-
-	for _, file := range files {
-		// Extract the tar.gz file
-		cmd := process.CommandContext(ctx, "tar", "-xzf", file, "-C", input.Out())
-		cmd.Dir = input.Out()
-		err = cmd.Run()
-		if err != nil {
-			return nil, fmt.Errorf("failed to extract tar.gz file: %v", err)
-		}
-
-		// Get the directory name without version number
-		dirName := strings.TrimSuffix(filepath.Base(file), ".tar.gz")
-		lastHyphen := strings.LastIndex(dirName, "-")
-		baseName := dirName[:lastHyphen]
-
-		extractedDir := filepath.Join(input.Out(), dirName)
-		targetDir := filepath.Join(input.Out(), baseName)
-
-		// Check if the package has a src/{package_name} structure
-		srcPath := filepath.Join(extractedDir, "src", baseName)
-		if _, err := os.Stat(srcPath); err == nil {
-			// Remove old directory if it exists
-			if err := os.RemoveAll(targetDir); err != nil {
-				return nil, fmt.Errorf("failed to remove old directory: %v", err)
-			}
-			// Move the contents from src/{package_name} directly to the target
-			if err := os.Rename(srcPath, targetDir); err != nil {
-				return nil, fmt.Errorf("failed to move src directory contents: %v", err)
-			}
-			// Clean up the original extracted directory
-			if err := os.RemoveAll(extractedDir); err != nil {
-				return nil, fmt.Errorf("failed to clean up extracted directory: %v", err)
-			}
-		} else {
-			// Handle the regular case (no src directory)
-			if err := os.RemoveAll(targetDir); err != nil {
-				return nil, fmt.Errorf("failed to remove old directory: %v", err)
-			}
-			if err := os.Rename(extractedDir, targetDir); err != nil {
-				return nil, fmt.Errorf("failed to rename directory: %v", err)
-			}
-		}
-	}
-
-	// 4. Remove the tar.gz files (non-recursive)
-	for _, file := range files {
-		err = os.Remove(file)
-		if err != nil {
-			return nil, fmt.Errorf("failed to remove tar.gz file: %v", err)
-		}
-	}
-
 	// If making a zip build or a local build then we need to install the dependencies and adjust the handler path
 	if !input.IsContainer || input.Dev {
+		pythonVersion := strings.TrimPrefix(input.Runtime, "python")
+		if pythonVersion == "" {
+			pythonVersion = "3.12"
+		}
 
 		// 5. Install the dependencies as a target
-		args := []string{"pip", "install", "-r", outputRequirementsFile, "--target", input.Out()}
+		args := []string{"pip", "install", "-r", outputRequirementsFile,
+			"--target", input.Out(),
+			"--no-deps", "--no-installer-metadata",
+			"--python-version", pythonVersion,
+		}
 		if !input.Dev {
 			// If we are not in dev mode then we need to install the dependencies for the target platform
 			// which is amazon linux for the correct architecture
-			pythonPlatform := "x86_64-unknown-linux-gnu"
+			pythonPlatform := "x86_64-manylinux2014"
 			if arch == "arm64" {
-				pythonPlatform = "aarch64-unknown-linux-gnu"
+				pythonPlatform = "aarch64-manylinux2014"
 			}
 			args = append(args, "--python-platform", pythonPlatform)
 		}
 		installCmd := process.CommandContext(ctx, "uv", args...)
-		installCmd.Dir = input.Out()
+		installCmd.Dir = workingDir
 		installOutput, err := installCmd.CombinedOutput()
 		if err != nil {
 			return nil, fmt.Errorf("failed to run uv pip install: %v\n%s", err, string(installOutput))
@@ -336,7 +257,7 @@ func (r *PythonRuntime) CreateBuildAsset(ctx context.Context, input *runtime.Bui
 		}, nil
 	} else {
 		// 5. Check if there is a Dockerfile in the handler directory
-		// 	If not then copy over the default one from the platform directory
+		//  If not then copy over the default one from the platform directory
 		workspaceDir, err := r.getWorkspaceDirectory(input)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get workspace directory: %v", err)

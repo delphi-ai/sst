@@ -1,2 +1,7 @@
 dist
 tmp
+# Platform-specific SST binaries for GitHub distribution
+!sdk/js/node_modules/sst-*/
+!sdk/js/node_modules/sst-*/bin/
+!sdk/js/node_modules/sst-*/bin/*
+!sdk/js/node_modules/sst-*/package.json
