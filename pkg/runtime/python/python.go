@@ -226,9 +226,10 @@ func (r *PythonRuntime) CreateBuildAsset(ctx context.Context, input *runtime.Bui
 		if !input.Dev {
 			// If we are not in dev mode then we need to install the dependencies for the target platform
 			// which is amazon linux for the correct architecture
-			pythonPlatform := "x86_64-manylinux2014"
+			// Using manylinux_2_28 for compatibility with modern packages (ujson, etc.)
+			pythonPlatform := "x86_64-manylinux_2_28"
 			if arch == "arm64" {
-				pythonPlatform = "aarch64-manylinux2014"
+				pythonPlatform = "aarch64-manylinux_2_28"
 			}
 			args = append(args, "--python-platform", pythonPlatform)
 		}
